@@ -1,15 +1,25 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { FC, useState } from 'react'
+import { FC, useRef, useState } from 'react'
 import toast from 'react-hot-toast'
 import { api } from '../api'
 import { MessageTemplateModal } from './MessageTemplateModal'
 import { CsvImportModal } from './CsvImportModal'
+import { VerifyEmailsSummaryModal } from './VerifyEmailsSummaryModal'
+import {
+  buildVerifyResultSummary,
+  getRemainingVerifyToastDelay,
+  mapErrorsToFailures,
+  mapIdsToFailures,
+  VerifyFailure,
+} from '../utils/verifyEmailsToast'
 
 export const LeadsList: FC = () => {
   const [selectedLeads, setSelectedLeads] = useState<number[]>([])
   const [isMessageModalOpen, setIsMessageModalOpen] = useState(false)
   const [isEnrichDropdownOpen, setIsEnrichDropdownOpen] = useState(false)
   const [isImportModalOpen, setIsImportModalOpen] = useState(false)
+  const [isVerifySummaryOpen, setIsVerifySummaryOpen] = useState(false)
+  const [verifyFailures, setVerifyFailures] = useState<VerifyFailure[]>([])
   const queryClient = useQueryClient()
 
   const leads = useQuery({
@@ -35,21 +45,88 @@ export const LeadsList: FC = () => {
     }
   })
 
+  const verifyToastIdRef = useRef<string | null>(null)
+  const verifyToastStartedAtRef = useRef(0)
+
+  const dismissVerifyToast = () => {
+    if (verifyToastIdRef.current) {
+      toast.dismiss(verifyToastIdRef.current)
+      verifyToastIdRef.current = null
+    }
+  }
+
+  // Instant results (e.g. all cached/fast lookups) would otherwise flash the
+  // loading toast for a frame or two, which reads as a glitch.
+  const settleVerifyToast = (showResult: () => void) => {
+    const remaining = getRemainingVerifyToastDelay(verifyToastStartedAtRef.current)
+
+    if (remaining > 0) {
+      setTimeout(() => {
+        dismissVerifyToast()
+        showResult()
+      }, remaining)
+    } else {
+      dismissVerifyToast()
+      showResult()
+    }
+  }
+
+  const showVerifyResultToast = (verifiedCount: number, failures: VerifyFailure[]) => {
+    const summary = buildVerifyResultSummary(verifiedCount, failures.length)
+
+    if (summary.variant === 'success') {
+      toast.success(summary.text)
+      return
+    }
+
+    const summaryMessage = (t: { id: string }) => (
+      <div className="flex items-center gap-3">
+        <span>{summary.text}</span>
+        <button
+          onClick={() => {
+            toast.dismiss(t.id)
+            setVerifyFailures(failures)
+            setIsVerifySummaryOpen(true)
+          }}
+          className="font-medium underline shrink-0"
+        >
+          See summary
+        </button>
+      </div>
+    )
+
+    if (summary.variant === 'error') {
+      toast.error(summaryMessage, { duration: 8000 })
+    } else {
+      toast(summaryMessage, { duration: 8000 })
+    }
+  }
+
   const verifyEmailsMutation = useMutation({
     mutationFn: async (ids: number[]) => api.leads.verifyEmails({ leadIds: ids }),
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ['leads', 'getMany'] })
-      setIsEnrichDropdownOpen(false)
-      toast.success(
-        data.verifiedCount === 1
-          ? `Verified ${data.verifiedCount} email`
-          : `Verified ${data.verifiedCount} emails`
-      )
+
+      const failures = mapErrorsToFailures(data.errors, leads.data)
+
+      settleVerifyToast(() => showVerifyResultToast(data.verifiedCount, failures))
     },
-    onError: () => {
-      toast.error('Failed to verify emails. Please try again.')
+    onError: (error, ids) => {
+      const message = error instanceof Error ? error.message : 'Could not reach the verification service'
+      const failures = mapIdsToFailures(ids, message, leads.data)
+
+      settleVerifyToast(() => showVerifyResultToast(0, failures))
     }
   })
+
+  const handleVerifyEmails = () => {
+    setIsEnrichDropdownOpen(false)
+    verifyToastStartedAtRef.current = Date.now()
+    verifyToastIdRef.current = toast.loading(
+      selectedLeads.length === 1 ? 'Verifying email...' : 'Verifying emails...'
+    )
+    verifyEmailsMutation.mutate(selectedLeads)
+  }
 
   const handleSelectAll = (checked: boolean) => {
     if (checked && leads.data) {
@@ -148,27 +225,15 @@ export const LeadsList: FC = () => {
                       </div>
                     </button>
                     <button
-                      onClick={() => verifyEmailsMutation.mutate(selectedLeads)}
+                      onClick={handleVerifyEmails}
                       disabled={verifyEmailsMutation.isPending}
                       className="block w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                     >
                       <div className="flex items-center">
-                        {verifyEmailsMutation.isPending ? (
-                          <>
-                            <svg className="animate-spin mr-3 h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                            </svg>
-                            Verifying...
-                          </>
-                        ) : (
-                          <>
-                            <svg className="mr-3 h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 12H8m8 0a8 8 0 11-16 0 8 8 0 0116 0zm-8 0V4" />
-                            </svg>
-                            Verify Email
-                          </>
-                        )}
+                        <svg className="mr-3 h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 12H8m8 0a8 8 0 11-16 0 8 8 0 0116 0zm-8 0V4" />
+                        </svg>
+                        Verify Email
                       </div>
                     </button>
                     <button
@@ -341,6 +406,12 @@ export const LeadsList: FC = () => {
       <CsvImportModal
         isOpen={isImportModalOpen}
         onClose={() => setIsImportModalOpen(false)}
+      />
+
+      <VerifyEmailsSummaryModal
+        isOpen={isVerifySummaryOpen}
+        onClose={() => setIsVerifySummaryOpen(false)}
+        failures={verifyFailures}
       />
     </div>
   )

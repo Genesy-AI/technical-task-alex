@@ -36,6 +36,7 @@ export const Providers: FC<PropsWithChildren> = ({ children }) => {
             },
           },
           loading: {
+            duration: Infinity,
             className:
               'bg-gray-50/95 text-gray-600 border border-gray-200/30 rounded-xl shadow-xl backdrop-blur-md text-sm font-medium px-4 py-3 max-w-sm',
             iconTheme: {
